@@ -20,6 +20,7 @@ from aiosmtpd.controller import Controller
 from aiosmtpd.smtp import AuthResult, Envelope, LoginPassword, Session, SMTP
 
 from .graph import GraphError, GraphSender
+from .telemetry import ControlPlaneReporter
 
 log = logging.getLogger("scanrelay")
 
@@ -42,6 +43,8 @@ class Config:
     tls_key: str = ""
     require_tls_for_auth: bool = False   # many old copiers can't do STARTTLS; LAN-only default
     max_attempts: int = 12
+    controlplane_url: str = ""           # optional: push send metadata to the control plane
+    controlplane_key: str = ""
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -62,6 +65,8 @@ class Config:
             log_path=e.get("SCANRELAY_LOG", "/var/log/scanrelay/sends.jsonl"),
             tls_cert=e.get("SCANRELAY_TLS_CERT", ""), tls_key=e.get("SCANRELAY_TLS_KEY", ""),
             require_tls_for_auth=e.get("SCANRELAY_REQUIRE_TLS", "0") in ("1", "true", "yes"),
+            controlplane_url=e.get("CONTROLPLANE_URL", "").strip(),
+            controlplane_key=e.get("CONTROLPLANE_KEY", ""),
         )
 
 
@@ -129,8 +134,8 @@ class Handler:
 class Spool:
     """Durable on-disk queue: <id>.eml + <id>.json (metadata, attempts, next_try)."""
 
-    def __init__(self, cfg: Config, sender: GraphSender):
-        self.cfg, self.sender = cfg, sender
+    def __init__(self, cfg: Config, sender: GraphSender, reporter: ControlPlaneReporter | None = None):
+        self.cfg, self.sender, self.reporter = cfg, sender, reporter
         self.dir = Path(cfg.spool)
         (self.dir / "failed").mkdir(parents=True, exist_ok=True)
         Path(cfg.log_path).parent.mkdir(parents=True, exist_ok=True)
@@ -148,12 +153,15 @@ class Spool:
         self._wake.set()
         return mid
 
-    def _record(self, meta: dict, status: str, detail: str = "", path: str = "") -> None:
+    def _record(self, meta: dict, status: str, detail: str = "", path: str = "", request_id: str = "") -> None:
         line = {"ts": time.time(), "id": meta["id"], "status": status, "peer": meta["peer"],
                 "user": meta["user"], "rcpt_count": len(meta["rcpts"]), "size": meta["size"],
-                "attempts": meta["attempts"], "path": path, "detail": detail[:300]}
+                "attempts": meta["attempts"], "path": path, "graph_request_id": request_id,
+                "detail": detail[:300]}
         with open(self.cfg.log_path, "a") as f:
             f.write(json.dumps(line) + "\n")
+        if self.reporter is not None:   # metadata only; failures are logged, never raised
+            self.reporter.report(meta, status, request_id)
 
     def process_once(self) -> int:
         done = 0
@@ -167,20 +175,21 @@ class Spool:
                 how = self.sender.send(epath.read_bytes(), meta["rcpts"])
             except Exception as e:  # noqa: BLE001
                 transient = isinstance(e, GraphError) and e.transient or not isinstance(e, GraphError)
+                rid = getattr(e, "request_id", "")
                 if transient and meta["attempts"] < self.cfg.max_attempts:
                     meta["next_try"] = time.time() + min(3600, 30 * 2 ** (meta["attempts"] - 1))
                     mpath.write_text(json.dumps(meta))
-                    self._record(meta, "retry", str(e))
+                    self._record(meta, "retry", str(e), request_id=rid)
                     log.warning("retry %s attempt=%s: %s", meta["id"], meta["attempts"], e)
                 else:
                     epath.rename(self.dir / "failed" / epath.name)
                     mpath.rename(self.dir / "failed" / mpath.name)
-                    self._record(meta, "failed", str(e))
+                    self._record(meta, "failed", str(e), request_id=rid)
                     log.error("FAILED %s: %s", meta["id"], e)
                 continue
             epath.unlink(missing_ok=True)   # never keep message content after delivery
             mpath.unlink(missing_ok=True)
-            self._record(meta, "sent", path=how)
+            self._record(meta, "sent", path=how, request_id=getattr(self.sender, "last_request_id", ""))
             log.info("sent %s via %s rcpts=%d size=%d", meta["id"], how, len(meta["rcpts"]), meta["size"])
             done += 1
         return done
@@ -199,9 +208,11 @@ class Spool:
         self._wake.set()
 
 
-def build(cfg: Config, sender: GraphSender | None = None):
+def build(cfg: Config, sender: GraphSender | None = None, reporter: ControlPlaneReporter | None = None):
     sender = sender or GraphSender(cfg.tenant_id, cfg.client_id, cfg.client_secret, cfg.sender)
-    spool = Spool(cfg, sender)
+    if reporter is None and cfg.controlplane_url:
+        reporter = ControlPlaneReporter(cfg.controlplane_url, cfg.controlplane_key)
+    spool = Spool(cfg, sender, reporter)
     tls = None
     if cfg.tls_cert and cfg.tls_key:
         tls = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)

@@ -9,6 +9,7 @@ dependencies = ["aiosmtpd>=1.4", "httpx>=0.27"]
 
 [project.scripts]
 scanrelay = "scanrelay.server:main"
+scanrelay-check = "scanrelay.check:main"
 
 [build-system]
 requires = ["setuptools>=68"]

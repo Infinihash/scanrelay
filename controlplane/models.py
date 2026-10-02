@@ -68,3 +68,15 @@ class AlertRule(Base):
     window_hours: Mapped[int] = mapped_column(Integer, default=24)
     min_sends: Mapped[int] = mapped_column(Integer, default=5)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class Subscription(Base):
+    """The MSP's own plan (one row, id=1). Billing data only: Stripe ids, never card details."""
+    __tablename__ = "subscription"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    plan: Mapped[str] = mapped_column(String(32), default="free")        # free | msp15 | msp50 | unlimited
+    status: Mapped[str] = mapped_column(String(32), default="active")    # Stripe subscription status
+    stripe_customer: Mapped[str] = mapped_column(String(64), default="")
+    stripe_subscription: Mapped[str] = mapped_column(String(64), default="")
+    current_period_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utcnow)

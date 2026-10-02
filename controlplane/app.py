@@ -22,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import alerts as alerts_mod
+from . import billing
 from .db import make_engine, make_sessionmaker
 from .models import Device, SendLog, Tenant, utcnow
 
@@ -141,6 +142,7 @@ def create_app(db_url: str | None = None, api_key: str | None = None) -> FastAPI
     def create_tenant(body: TenantIn, s: Session = Depends(db)):
         if s.scalar(select(Tenant).where(Tenant.name == body.name)):
             raise HTTPException(409, "tenant exists")
+        billing.check_can_add_tenant(s)
         key = "srk_" + secrets.token_urlsafe(32)
         t = Tenant(**body.model_dump(), ingest_key_hash=_hash(key))
         s.add(t)
@@ -237,6 +239,8 @@ def create_app(db_url: str | None = None, api_key: str | None = None) -> FastAPI
         r.set_cookie(COOKIE, key, httponly=True, samesite="strict", secure=os.environ.get(
             "CONTROLPLANE_INSECURE_COOKIE", "0") != "1")
         return r
+
+    billing.register(app, db, admin)
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request, s: Session = Depends(db)):

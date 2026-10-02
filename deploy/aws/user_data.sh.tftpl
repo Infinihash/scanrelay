@@ -1,0 +1,95 @@
+#!/bin/bash
+# ScanRelay hosted node bootstrap (Amazon Linux 2023, arm64). Rendered by Terraform.
+set -euo pipefail
+exec > >(tee -a /var/log/scanrelay-bootstrap.log) 2>&1
+
+REGION="${region}"
+SECRET_ARN="${secret_arn}"
+REPO_URL="${repo_url}"
+REPO_REF="${repo_ref}"
+TLS_HOST="${tls_hostname}"
+ACME_EMAIL="${acme_email}"
+
+dnf -y install docker git jq python3 openssl
+systemctl enable --now docker
+
+install -d -m 0750 /etc/scanrelay /etc/scanrelay/tls /var/lib/scanrelay
+chown 10001:10001 /var/lib/scanrelay
+
+# --- build the pinned image ---------------------------------------------------
+rm -rf /opt/scanrelay-src
+git clone --quiet "$REPO_URL" /opt/scanrelay-src
+git -C /opt/scanrelay-src checkout --quiet "$REPO_REF"
+docker build -q -t scanrelay:local /opt/scanrelay-src
+
+# --- env file from Secrets Manager (never written to user-data or logs) ------
+cat > /usr/local/sbin/scanrelay-env <<'EOF'
+#!/bin/bash
+set -euo pipefail
+umask 077
+aws secretsmanager get-secret-value --region "$1" --secret-id "$2" \
+  --query SecretString --output text \
+  | jq -r 'to_entries[] | select(.key|startswith("SCANRELAY_")) | "\(.key)=\(.value)"' \
+  > /etc/scanrelay/env.tmp
+mv /etc/scanrelay/env.tmp /etc/scanrelay/env
+EOF
+chmod 0700 /usr/local/sbin/scanrelay-env
+/usr/local/sbin/scanrelay-env "$REGION" "$SECRET_ARN"
+
+# --- TLS: Let's Encrypt when a hostname is given, else self-signed ------------
+if [ -n "$TLS_HOST" ]; then
+  python3 -m venv /opt/certbot
+  /opt/certbot/bin/pip install -q certbot
+  /opt/certbot/bin/certbot certonly --standalone --non-interactive --agree-tos \
+    -m "$ACME_EMAIL" -d "$TLS_HOST"
+  cat > /usr/local/sbin/scanrelay-certcopy <<EOF
+#!/bin/bash
+install -m 0640 -o root -g 10001 /etc/letsencrypt/live/$TLS_HOST/fullchain.pem /etc/scanrelay/tls/cert.pem
+install -m 0640 -o root -g 10001 /etc/letsencrypt/live/$TLS_HOST/privkey.pem /etc/scanrelay/tls/key.pem
+docker restart scanrelay >/dev/null 2>&1 || true
+EOF
+  chmod 0700 /usr/local/sbin/scanrelay-certcopy
+  /usr/local/sbin/scanrelay-certcopy
+  cat > /etc/systemd/system/scanrelay-renew.service <<'EOF'
+[Unit]
+Description=Renew ScanRelay TLS certificate
+[Service]
+Type=oneshot
+ExecStart=/opt/certbot/bin/certbot renew --quiet --deploy-hook /usr/local/sbin/scanrelay-certcopy
+EOF
+  cat > /etc/systemd/system/scanrelay-renew.timer <<'EOF'
+[Unit]
+Description=Twice-daily ScanRelay certificate renewal check
+[Timer]
+OnCalendar=*-*-* 03,15:17:00
+RandomizedDelaySec=1h
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now scanrelay-renew.timer
+else
+  openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=scanrelay" \
+    -keyout /etc/scanrelay/tls/key.pem -out /etc/scanrelay/tls/cert.pem
+  chgrp 10001 /etc/scanrelay/tls/*.pem
+  chmod 0640 /etc/scanrelay/tls/*.pem
+fi
+chgrp 10001 /etc/scanrelay /etc/scanrelay/tls
+chmod 0750 /etc/scanrelay/tls
+
+# --- run: STARTTLS required before AUTH on an internet-facing node -----------
+docker rm -f scanrelay >/dev/null 2>&1 || true
+docker run -d --name scanrelay --restart unless-stopped \
+  -p 587:2525 \
+  --env-file /etc/scanrelay/env \
+  -e SCANRELAY_REQUIRE_TLS=1 \
+  -e SCANRELAY_TLS_CERT=/tls/cert.pem -e SCANRELAY_TLS_KEY=/tls/key.pem \
+  -e SCANRELAY_LOG=/var/lib/scanrelay/sends.jsonl \
+  -v /etc/scanrelay/tls:/tls:ro \
+  -v /var/lib/scanrelay:/var/lib/scanrelay \
+  --read-only --tmpfs /tmp --security-opt no-new-privileges --cap-drop ALL \
+  --log-opt max-size=10m --log-opt max-file=5 \
+  scanrelay:local
+
+echo "scanrelay bootstrap complete"

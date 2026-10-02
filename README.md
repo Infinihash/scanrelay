@@ -88,3 +88,13 @@ Creating a tenant returns a one-time **relay ingest key** (only its hash is stor
 Apache-2.0. The hosted relay and the multi-tenant MSP dashboard are commercial add-ons: https://scanrelay.infinihash.com
 
 *Not affiliated with Microsoft. Microsoft 365 and Exchange Online are trademarks of Microsoft Corporation.*
+
+## Control plane billing (hosted edition)
+
+Billing is off unless `STRIPE_SECRET_KEY` is set; self-hosted installs have no limits.
+When on, an MSP gets 3 client tenants free, then MSP 15 ($49/mo), MSP 50 ($99/mo) or
+Unlimited ($199/mo). Set `STRIPE_PRICE_MSP15`, `STRIPE_PRICE_MSP50`, `STRIPE_PRICE_UNLIMITED`
+and `STRIPE_WEBHOOK_SECRET`, and point a Stripe webhook (`checkout.session.completed`,
+`customer.subscription.*`) at `/api/v1/billing/webhook`. `POST /api/v1/billing/checkout`
+returns a Checkout link; adding a tenant past the limit returns 402. Downgrades never cut
+off existing tenants, they only block new ones.

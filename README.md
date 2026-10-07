@@ -41,7 +41,7 @@ docker run -d --name scanrelay --restart unless-stopped -p 25:2525 \
   -e SCANRELAY_SENDER=scans@contoso.com \
   -e SCANRELAY_ALLOW_IPS=192.168.10.0/24 \
   -e SCANRELAY_USERS=copier1:changeme \
-  -v scanrelay-spool:/var/lib/scanrelay scanrelay:latest   # build first: docker build -t scanrelay .
+  -v scanrelay-spool:/var/lib/scanrelay ghcr.io/infinihash/scanrelay:latest   # amd64 + arm64; or build locally: docker build -t scanrelay .
 ```
 
 | Variable | Meaning |

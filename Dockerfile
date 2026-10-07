@@ -4,6 +4,7 @@ RUN useradd -r -u 10001 scanrelay && mkdir -p /var/lib/scanrelay /var/log/scanre
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY scanrelay ./scanrelay
+COPY controlplane ./controlplane
 RUN pip install --no-cache-dir .
 USER scanrelay
 ENV SCANRELAY_SPOOL=/var/lib/scanrelay/spool SCANRELAY_LOG=/var/lib/scanrelay/sends.jsonl SCANRELAY_PORT=2525

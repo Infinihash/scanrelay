@@ -1,0 +1,55 @@
+name: image
+
+# Builds the relay image on every PR (no push) and publishes a multi-arch
+# image (amd64 + arm64, so it runs on Graviton t4g and Raspberry Pi-class
+# boxes in client closets) to ghcr.io/infinihash/scanrelay on main and tags.
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/infinihash/scanrelay
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=sha,format=short
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test (amd64)
+        run: |
+          docker buildx build --load -t scanrelay:ci .
+          # Must refuse to start as an open relay when nothing is configured.
+          set +e
+          out=$(timeout 20 docker run --rm scanrelay:ci 2>&1); rc=$?
+          set -e
+          echo "$out" | tail -5
+          test $rc -ne 0

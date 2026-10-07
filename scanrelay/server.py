@@ -194,8 +194,23 @@ class Spool:
             done += 1
         return done
 
+    _SWEEP_EVERY = 6 * 3600
+
+    def maybe_sweep(self, force: bool = False) -> None:
+        """Enforce the published retention (DATA.md): failed mail and old log lines."""
+        now = time.time()
+        if not force and now - getattr(self, "_last_sweep", 0) < self._SWEEP_EVERY:
+            return
+        self._last_sweep = now
+        try:
+            from . import retention
+            retention.sweep(self.dir, self.cfg.log_path)
+        except Exception:  # noqa: BLE001
+            log.exception("retention sweep failed")
+
     def run(self) -> None:
         while not self._stop.is_set():
+            self.maybe_sweep()
             try:
                 self.process_once()
             except Exception:  # noqa: BLE001

@@ -9,7 +9,7 @@ Devices keep speaking plain SMTP on your LAN. ScanRelay sends each message **fro
 - **No DNS/SPF changes**, and no third-party sending service
 - Least privilege: the app can send as **one mailbox only** (Exchange RBAC for Applications)
 - Not an open relay: every session must come from an allowlisted IP or log in
-- Message content is spooled only until it's delivered, then deleted. The log keeps metadata only.
+- Message content is spooled only until it's delivered, then deleted. The log keeps metadata only. Failed messages are purged after 14 days. See [DATA.md](DATA.md).
 
 ```
 copier / app ──SMTP──▶ ScanRelay ──OAuth 2.0──▶ Microsoft Graph /sendMail ──▶ recipient

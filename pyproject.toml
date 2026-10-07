@@ -14,6 +14,7 @@ test = ["pytest>=8"]
 [project.scripts]
 scanrelay = "scanrelay.server:main"
 scanrelay-controlplane = "controlplane.app:main"
+scanrelay-retention = "scanrelay.retention:main"
 
 [build-system]
 requires = ["setuptools>=68"]

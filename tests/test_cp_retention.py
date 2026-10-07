@@ -1,3 +1,7 @@
+import pytest
+
+pytest.importorskip("sqlalchemy")
+
 import datetime as dt
 
 from controlplane.db import make_engine, make_sessionmaker

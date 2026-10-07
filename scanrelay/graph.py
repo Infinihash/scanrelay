@@ -17,9 +17,9 @@ CHUNK = 4 * 1024 * 1024 - (4 * 1024 * 1024 % 327_680)  # upload chunks must be m
 
 
 class GraphError(Exception):
-    def __init__(self, status: int, detail: str):
+    def __init__(self, status: int, detail: str, request_id: str = ""):
         super().__init__(f"Graph {status}: {detail[:300]}")
-        self.status = status
+        self.status, self.request_id = status, request_id
 
     @property
     def transient(self) -> bool:
@@ -34,6 +34,7 @@ class GraphSender:
         self.sender, self.save_to_sent, self.authority = sender, save_to_sent, authority
         self.http = client or httpx.Client(timeout=60)
         self._token, self._exp = "", 0.0
+        self.last_request_id = ""   # Graph "request-id" of the last call, for support tickets
 
     # ---- auth -------------------------------------------------------------
     def token(self) -> str:
@@ -52,13 +53,15 @@ class GraphSender:
         h = kw.pop("headers", {})
         h["Authorization"] = "Bearer " + self.token()
         r = self.http.request(method, url if url.startswith("http") else GRAPH + url, headers=h, **kw)
+        self.last_request_id = r.headers.get("request-id", "")
         if r.status_code >= 400:
-            raise GraphError(r.status_code, r.text)
+            raise GraphError(r.status_code, r.text, self.last_request_id)
         return r
 
     # ---- send -------------------------------------------------------------
     def send(self, raw: bytes, envelope_rcpts: list[str]) -> str:
         """Send a message. Returns 'mime' or 'draft' (path used)."""
+        self.last_request_id = ""
         msg = prepare(raw, self.sender, envelope_rcpts)
         data = msg.as_bytes(policy=email.policy.SMTP)
         if len(data) <= MIME_LIMIT:

@@ -60,6 +60,29 @@ On the copier, set **SMTP server** to the relay's IP, **port** 25 (or whatever p
 
 Messages are written to a disk spool and accepted immediately. A worker delivers them through Graph and retries throttling and 5xx errors with exponential backoff (up to about 12 attempts). Permanent errors, such as a 403 when the mailbox is out of scope, go to `spool/failed/`. Each attempt is logged to `sends.jsonl`, metadata only.
 
+## Control plane (preview)
+
+For MSPs running ScanRelay across many client tenants, `controlplane/` is a small FastAPI + SQLAlchemy service (SQLite by default, Postgres via `CONTROLPLANE_DB_URL`) that tracks:
+
+- **Tenants**: name, Entra tenant ID, client ID, and the client secret's **expiry date** plus a *reference* to where it's stored (for example `vault:msp/acme/scanrelay`). The secret itself is never stored, and the API rejects it.
+- **Devices**: name, auth mode (login / IP), allowed IPs. Devices also register themselves on first send.
+- **Send log**: metadata only (time, device, recipient count, size, status, Graph `request-id`). No subjects, bodies, attachment names or addresses.
+- **Alerts**: client secret expiring within 30/14/7 days (info/warning/critical) or already expired, device failure rate (default: 20% or more of at least 5 sends in 24h), and no traffic from a device (default: 72h). Thresholds can be overridden globally or per tenant with `AlertRule` rows.
+
+```bash
+pip install '.[controlplane]'
+CONTROLPLANE_API_KEY=$(openssl rand -hex 24) scanrelay-controlplane   # listens on 127.0.0.1:8080
+```
+
+Admin API calls use the `X-API-Key` header (`/api/v1/tenants`, `/devices`, `/sends`, `/alerts`, `/fleet`). The dashboard at `/` (sign in at `/login`) shows a fleet health table: health, tenant, device, auth mode, sends and failure rate over 24h, last seen, days until the secret expires, and active alerts. Put it behind HTTPS; set `CONTROLPLANE_INSECURE_COOKIE=1` only for local HTTP testing.
+
+Creating a tenant returns a one-time **relay ingest key** (only its hash is stored). To have a relay report to the control plane, set these on the relay. The hook is off by default, and a control plane outage never affects mail delivery:
+
+| Variable | Meaning |
+|---|---|
+| `CONTROLPLANE_URL` | Control plane base URL, for example `https://cp.example.com` |
+| `CONTROLPLANE_KEY` | That tenant's relay ingest key |
+
 ## License
 
 Apache-2.0. The hosted relay and the multi-tenant MSP dashboard are commercial add-ons: https://scanrelay.infinihash.com

@@ -7,12 +7,17 @@ license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
 dependencies = ["aiosmtpd>=1.4", "httpx>=0.27"]
 
+[project.optional-dependencies]
+controlplane = ["fastapi>=0.110", "sqlalchemy>=2.0", "uvicorn>=0.29", "python-multipart>=0.0.9"]
+test = ["pytest>=8"]
+
 [project.scripts]
 scanrelay = "scanrelay.server:main"
+scanrelay-controlplane = "controlplane.app:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["scanrelay"]
+packages = ["scanrelay", "controlplane"]

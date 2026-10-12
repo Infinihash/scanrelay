@@ -56,6 +56,26 @@ docker run -d --name scanrelay --restart unless-stopped -p 25:2525 \
 
 On the copier, set **SMTP server** to the relay's IP, **port** 25 (or whatever port you mapped), and either no authentication (allowlisted IP) or the per-device login. The *From* address is rewritten to the sending mailbox, and the device's original From address is kept as Reply-To.
 
+## Scripts and cron jobs: `scanrelay-send`
+
+Not everything that sends mail is a copier. Alert scripts, cron jobs and apps that call
+`sendmail` (or log in to `smtp.office365.com` with a password) can send through Graph directly,
+with no listener to run:
+
+```sh
+pip install scanrelay          # or use the Docker image
+echo "/var is at 97%" | scanrelay-send --to ops@example.com --subject "disk alert"
+scanrelay-send -t < message.eml              # recipients from To/Cc/Bcc, like sendmail -t
+```
+
+It reads the same `scanrelay.env` that `Setup-ScanRelay.ps1` writes (`--env-file`,
+`$SCANRELAY_ENV_FILE`, `/etc/scanrelay/scanrelay.env` or `./scanrelay.env`), and environment
+variables override the file. Common sendmail flags (`-i`, `-oi`, `-f`, `-F`) are accepted and
+ignored, so it can stand in for `/usr/sbin/sendmail`. The From address is always the one scoped
+mailbox. Exit codes follow sysexits: `0` sent, `75` temporary (safe to retry), `77` credentials or
+permission problem, `69` other permanent failure, `64`/`65` usage or bad input. `--dry-run`
+checks the message without calling Graph. The client secret is never printed.
+
 ## Delivery and retries
 
 Messages are written to a disk spool and accepted immediately. A worker delivers them through Graph and retries throttling and 5xx errors with exponential backoff (up to about 12 attempts). Permanent errors, such as a 403 when the mailbox is out of scope, go to `spool/failed/`. Each attempt is logged to `sends.jsonl`, metadata only.

@@ -14,7 +14,7 @@ Format: `- CLAIM | tests/<file>.py::<function>[, tests/<file>.py::<function>]`
 - Large attachments are sent through a Graph upload session | tests/test_relay.py::test_large_attachment_uses_upload_session
 
 ## Data (DATA.md, README)
-- Message content is deleted once delivered or after the retention period; failed messages are purged at 14 days; the send log keeps 90 days | tests/test_retention.py::test_failed_older_than_retention_purged_recent_kept, tests/test_retention.py::test_old_send_rows_purged_recent_kept
+- Message content is deleted once delivered or after the retention period; failed messages are purged at 14 days; the send log keeps 90 days | tests/test_retention.py::test_failed_older_than_retention_purged_recent_kept, tests/test_cp_retention.py::test_old_send_rows_purged_recent_kept
 - A message still being delivered is never purged | tests/test_retention.py::test_inflight_spool_never_touched_by_purge
 - A dry run deletes nothing | tests/test_retention.py::test_dry_run_deletes_nothing
 - The running relay enforces retention on its own | tests/test_retention.py::test_running_relay_enforces_retention, tests/test_retention.py::test_worker_loop_runs_the_sweep

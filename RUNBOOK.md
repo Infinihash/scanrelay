@@ -36,3 +36,22 @@ ls /var/lib/scanrelay/spool /var/lib/scanrelay/spool/failed
 
 ## Restore
 No database to restore for the relay (spool is transient). Control plane: restore its SQLite/Postgres backup; ingest keys are stored hashed, so rotate keys if the DB was lost. Config is env vars; secrets live in the operator's secret store.
+
+
+## Alert notifications (Slack / Teams / webhook)
+
+`scanrelay-notify` posts control-plane alerts (expiring client secrets, failing devices,
+devices gone quiet) to a webhook. It only posts changes: new, severity changed, still open
+after `SCANRELAY_ALERT_REPEAT_HOURS` (default 24), and resolved.
+
+```
+CONTROLPLANE_DB_URL=sqlite:////var/lib/scanrelay/controlplane.db
+SCANRELAY_ALERT_WEBHOOK=https://hooks.slack.com/services/...   # secret; keep in an env file
+SCANRELAY_ALERT_FORMAT=slack        # slack | teams (Workflows webhook, Adaptive Card) | json
+SCANRELAY_ALERT_STATE=/var/lib/scanrelay/alert-state.json
+scanrelay-notify --dry-run          # show what would post, change nothing
+scanrelay-notify                    # run every 15 min from cron or a systemd timer
+```
+
+State is written only after the webhook accepts the post, so a failed post is retried on
+the next run. The webhook URL is never printed or logged.

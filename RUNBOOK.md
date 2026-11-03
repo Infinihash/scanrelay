@@ -36,3 +36,7 @@ ls /var/lib/scanrelay/spool /var/lib/scanrelay/spool/failed
 
 ## Restore
 No database to restore for the relay (spool is transient). Control plane: restore its SQLite/Postgres backup; ingest keys are stored hashed, so rotate keys if the DB was lost. Config is env vars; secrets live in the operator's secret store.
+
+## Audit trail
+`audit.jsonl` (relay) and `audit_log` (control plane) are hash-chained and append-only; see DATA.md. Check: `scanrelay-audit verify`; `cat /var/log/scanrelay/audit-status.json` (refreshed every 6 h sweep); control plane `GET /api/v1/audit/verify`. If broken: do not edit; copy the files, note `broken_at`, compare with the last exported `head`. Evidence: `scanrelay-audit export out.json`, `GET /api/v1/export`.
+

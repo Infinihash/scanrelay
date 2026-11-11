@@ -33,6 +33,17 @@ Test-ServicePrincipalAuthorization -Identity $appId -Resource scans@contoso.com 
 
 `scans@contoso.com` can be a shared mailbox, which needs no license.
 
+**Shortcut:** `scripts/Setup-ScanRelay.ps1 -Sender scans@contoso.com -CreateSharedMailbox` does steps 1–3 in one go (app registration, secret, shared mailbox, scoped RBAC) and writes `scanrelay.env`. Add `-WhatIf` to preview.
+
+Then verify before touching any copier:
+
+```bash
+scanrelay-check                          # token only
+scanrelay-check --send-to you@contoso.com   # sends one test message
+```
+
+It translates the usual errors (wrong secret value, expired secret, RBAC scope not applied yet) into a plain next step.
+
 ## 2. Run it
 
 ```bash

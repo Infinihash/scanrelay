@@ -19,7 +19,9 @@ from pathlib import Path
 from aiosmtpd.controller import Controller
 from aiosmtpd.smtp import AuthResult, Envelope, LoginPassword, Session, SMTP
 
+from . import audit
 from .graph import GraphError, GraphSender
+from .telemetry import ControlPlaneReporter
 
 log = logging.getLogger("scanrelay")
 
@@ -38,10 +40,13 @@ class Config:
     max_size: int = 35 * 1024 * 1024
     spool: str = "/var/lib/scanrelay/spool"
     log_path: str = "/var/log/scanrelay/sends.jsonl"
+    audit_path: str = ""                 # tamper-evident chain; default: audit.jsonl beside the send log
     tls_cert: str = ""
     tls_key: str = ""
     require_tls_for_auth: bool = False   # many old copiers can't do STARTTLS; LAN-only default
     max_attempts: int = 12
+    controlplane_url: str = ""           # optional: push send metadata to the control plane
+    controlplane_key: str = ""
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -60,8 +65,11 @@ class Config:
             max_size=int(e.get("SCANRELAY_MAX_SIZE", str(35 * 1024 * 1024))),
             spool=e.get("SCANRELAY_SPOOL", "/var/lib/scanrelay/spool"),
             log_path=e.get("SCANRELAY_LOG", "/var/log/scanrelay/sends.jsonl"),
+            audit_path=e.get("SCANRELAY_AUDIT", ""),
             tls_cert=e.get("SCANRELAY_TLS_CERT", ""), tls_key=e.get("SCANRELAY_TLS_KEY", ""),
             require_tls_for_auth=e.get("SCANRELAY_REQUIRE_TLS", "0") in ("1", "true", "yes"),
+            controlplane_url=e.get("CONTROLPLANE_URL", "").strip(),
+            controlplane_key=e.get("CONTROLPLANE_KEY", ""),
         )
 
 
@@ -129,9 +137,10 @@ class Handler:
 class Spool:
     """Durable on-disk queue: <id>.eml + <id>.json (metadata, attempts, next_try)."""
 
-    def __init__(self, cfg: Config, sender: GraphSender):
-        self.cfg, self.sender = cfg, sender
+    def __init__(self, cfg: Config, sender: GraphSender, reporter: ControlPlaneReporter | None = None):
+        self.cfg, self.sender, self.reporter = cfg, sender, reporter
         self.dir = Path(cfg.spool)
+        self.audit_path = cfg.audit_path or str(Path(cfg.log_path).with_name("audit.jsonl"))
         (self.dir / "failed").mkdir(parents=True, exist_ok=True)
         Path(cfg.log_path).parent.mkdir(parents=True, exist_ok=True)
         self._wake = threading.Event()
@@ -145,15 +154,24 @@ class Spool:
         tmp = self.dir / f"{mid}.json.tmp"
         tmp.write_text(json.dumps(meta))
         tmp.rename(self.dir / f"{mid}.json")   # atomic: worker only sees complete items
+        audit.append(self.audit_path, "message_received", mid,
+                     {"eml_sha256": audit.sha256_bytes(raw), "size": len(raw), "rcpt_count": len(rcpts)})
         self._wake.set()
         return mid
 
-    def _record(self, meta: dict, status: str, detail: str = "", path: str = "") -> None:
+    def _record(self, meta: dict, status: str, detail: str = "", path: str = "", request_id: str = "") -> None:
         line = {"ts": time.time(), "id": meta["id"], "status": status, "peer": meta["peer"],
                 "user": meta["user"], "rcpt_count": len(meta["rcpts"]), "size": meta["size"],
-                "attempts": meta["attempts"], "path": path, "detail": detail[:300]}
+                "attempts": meta["attempts"], "path": path, "graph_request_id": request_id,
+                "detail": detail[:300]}
         with open(self.cfg.log_path, "a") as f:
             f.write(json.dumps(line) + "\n")
+        if status in ("sent", "failed"):   # terminal outcomes only; retries are noise
+            audit.append(self.audit_path, "send_recorded", meta["id"],
+                         {"status": status, "rcpt_count": len(meta["rcpts"]), "size": meta["size"],
+                          "attempts": meta["attempts"], "graph_request_id": request_id})
+        if self.reporter is not None:   # metadata only; failures are logged, never raised
+            self.reporter.report(meta, status, request_id)
 
     def process_once(self) -> int:
         done = 0
@@ -167,26 +185,42 @@ class Spool:
                 how = self.sender.send(epath.read_bytes(), meta["rcpts"])
             except Exception as e:  # noqa: BLE001
                 transient = isinstance(e, GraphError) and e.transient or not isinstance(e, GraphError)
+                rid = getattr(e, "request_id", "")
                 if transient and meta["attempts"] < self.cfg.max_attempts:
                     meta["next_try"] = time.time() + min(3600, 30 * 2 ** (meta["attempts"] - 1))
                     mpath.write_text(json.dumps(meta))
-                    self._record(meta, "retry", str(e))
+                    self._record(meta, "retry", str(e), request_id=rid)
                     log.warning("retry %s attempt=%s: %s", meta["id"], meta["attempts"], e)
                 else:
                     epath.rename(self.dir / "failed" / epath.name)
                     mpath.rename(self.dir / "failed" / mpath.name)
-                    self._record(meta, "failed", str(e))
+                    self._record(meta, "failed", str(e), request_id=rid)
                     log.error("FAILED %s: %s", meta["id"], e)
                 continue
             epath.unlink(missing_ok=True)   # never keep message content after delivery
             mpath.unlink(missing_ok=True)
-            self._record(meta, "sent", path=how)
+            self._record(meta, "sent", path=how, request_id=getattr(self.sender, "last_request_id", ""))
             log.info("sent %s via %s rcpts=%d size=%d", meta["id"], how, len(meta["rcpts"]), meta["size"])
             done += 1
         return done
 
+    _SWEEP_EVERY = 6 * 3600
+
+    def maybe_sweep(self, force: bool = False) -> None:
+        """Enforce the published retention (DATA.md): failed mail and old log lines."""
+        now = time.time()
+        if not force and now - getattr(self, "_last_sweep", 0) < self._SWEEP_EVERY:
+            return
+        self._last_sweep = now
+        try:
+            from . import retention
+            retention.sweep(self.dir, self.cfg.log_path, audit_path=self.audit_path)
+        except Exception:  # noqa: BLE001
+            log.exception("retention sweep failed")
+
     def run(self) -> None:
         while not self._stop.is_set():
+            self.maybe_sweep()
             try:
                 self.process_once()
             except Exception:  # noqa: BLE001
@@ -199,9 +233,11 @@ class Spool:
         self._wake.set()
 
 
-def build(cfg: Config, sender: GraphSender | None = None):
+def build(cfg: Config, sender: GraphSender | None = None, reporter: ControlPlaneReporter | None = None):
     sender = sender or GraphSender(cfg.tenant_id, cfg.client_id, cfg.client_secret, cfg.sender)
-    spool = Spool(cfg, sender)
+    if reporter is None and cfg.controlplane_url:
+        reporter = ControlPlaneReporter(cfg.controlplane_url, cfg.controlplane_key)
+    spool = Spool(cfg, sender, reporter)
     tls = None
     if cfg.tls_cert and cfg.tls_key:
         tls = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)

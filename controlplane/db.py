@@ -26,6 +26,6 @@ def make_engine(url: str | None = None) -> Engine:
 
 
 def make_sessionmaker(engine: Engine) -> sessionmaker:
-    from . import models  # noqa: F401  (register tables)
+    from . import audit, models  # noqa: F401  (register tables, incl. the audit chain)
     Base.metadata.create_all(engine)
     return sessionmaker(bind=engine, expire_on_commit=False)

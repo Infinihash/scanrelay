@@ -55,3 +55,6 @@ scanrelay-notify                    # run every 15 min from cron or a systemd ti
 
 State is written only after the webhook accepts the post, so a failed post is retried on
 the next run. The webhook URL is never printed or logged.
+## Audit trail
+`audit.jsonl` (relay) and `audit_log` (control plane) are hash-chained and append-only; see DATA.md. Check: `scanrelay-audit verify`; `cat /var/log/scanrelay/audit-status.json` (refreshed every 6 h sweep); control plane `GET /api/v1/audit/verify`. If broken: do not edit; copy the files, note `broken_at`, compare with the last exported `head`. Evidence: `scanrelay-audit export out.json`, `GET /api/v1/export`.
+

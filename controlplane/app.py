@@ -19,9 +19,11 @@ from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import alerts as alerts_mod
+from . import audit
 from .db import make_engine, make_sessionmaker
 from .models import Device, SendLog, Tenant, utcnow
 
@@ -144,6 +146,8 @@ def create_app(db_url: str | None = None, api_key: str | None = None) -> FastAPI
         key = "srk_" + secrets.token_urlsafe(32)
         t = Tenant(**body.model_dump(), ingest_key_hash=_hash(key))
         s.add(t)
+        s.flush()
+        audit.append(s, "tenant_created", f"tenant:{t.id}", {})
         s.commit()
         return {**tenant_out(t), "ingest_key": key}   # shown once; only the hash is stored
 
@@ -160,8 +164,10 @@ def create_app(db_url: str | None = None, api_key: str | None = None) -> FastAPI
     @app.patch("/api/v1/tenants/{tid}", dependencies=[Depends(admin)])
     def patch_tenant(tid: int, body: TenantPatch, s: Session = Depends(db)):
         t = get_tenant(s, tid)
-        for k, v in body.model_dump(exclude_unset=True).items():
+        changed = body.model_dump(exclude_unset=True)
+        for k, v in changed.items():
             setattr(t, k, v)
+        audit.append(s, "tenant_patched", f"tenant:{t.id}", {"fields": sorted(changed)})
         s.commit()
         return tenant_out(t)
 
@@ -170,6 +176,7 @@ def create_app(db_url: str | None = None, api_key: str | None = None) -> FastAPI
         t = get_tenant(s, tid)
         key = "srk_" + secrets.token_urlsafe(32)
         t.ingest_key_hash = _hash(key)
+        audit.append(s, "ingest_key_rotated", f"tenant:{t.id}", {})
         s.commit()
         return {"ingest_key": key}
 
@@ -181,6 +188,8 @@ def create_app(db_url: str | None = None, api_key: str | None = None) -> FastAPI
             raise HTTPException(409, "device exists")
         d = Device(tenant=t, **body.model_dump())
         s.add(d)
+        s.flush()
+        audit.append(s, "device_created", f"device:{d.id}", {"tenant": t.id})
         s.commit()
         return device_out(d)
 
@@ -196,6 +205,15 @@ def create_app(db_url: str | None = None, api_key: str | None = None) -> FastAPI
         return [{"ts": l.ts.isoformat(), "device": name, "recipients": l.recipients, "size": l.size,
                  "status": l.status, "graph_request_id": l.graph_request_id} for l, name in s.execute(q)]
 
+    # ---- audit trail / evidence ----
+    @app.get("/api/v1/audit/verify", dependencies=[Depends(admin)])
+    def audit_verify(s: Session = Depends(db)):
+        return audit.verify(s)
+
+    @app.get("/api/v1/export", dependencies=[Depends(admin)])
+    def export_all(s: Session = Depends(db)):
+        return audit.export(s)
+
     # ---- alerts / fleet ----
     @app.get("/api/v1/alerts", dependencies=[Depends(admin)])
     def get_alerts(s: Session = Depends(db)):
@@ -208,19 +226,28 @@ def create_app(db_url: str | None = None, api_key: str | None = None) -> FastAPI
     # ---- relay -> control plane metrics push ----
     @app.post("/api/v1/ingest", status_code=202)
     def ingest(body: IngestBatch, t: Tenant = Depends(relay_tenant), s: Session = Depends(db)):
-        t = s.merge(t)
-        devices = {d.name: d for d in t.devices}
-        for ev in body.events:
-            d = devices.get(ev.device)
-            if d is None:
-                d = devices[ev.device] = Device(tenant=t, name=ev.device, auth_mode=ev.auth_mode or "unknown")
-                s.add(d)
-            elif ev.auth_mode and d.auth_mode == "unknown":
-                d.auth_mode = ev.auth_mode
-            ts = dt.datetime.fromtimestamp(ev.ts, dt.timezone.utc).replace(tzinfo=None) if ev.ts else utcnow()
-            s.add(SendLog(device=d, ts=ts, recipients=ev.recipients, size=ev.size, status=ev.status,
-                          graph_request_id=ev.graph_request_id))
-        s.commit()
+        tid = t.id
+        for attempt in range(8):   # concurrent batches race for the next audit seq: redo the whole batch, never drop it
+            try:
+                t = s.get(Tenant, tid)
+                devices = {d.name: d for d in t.devices}
+                for ev in body.events:
+                    d = devices.get(ev.device)
+                    if d is None:
+                        d = devices[ev.device] = Device(tenant=t, name=ev.device, auth_mode=ev.auth_mode or "unknown")
+                        s.add(d)
+                    elif ev.auth_mode and d.auth_mode == "unknown":
+                        d.auth_mode = ev.auth_mode
+                    ts = dt.datetime.fromtimestamp(ev.ts, dt.timezone.utc).replace(tzinfo=None) if ev.ts else utcnow()
+                    s.add(SendLog(device=d, ts=ts, recipients=ev.recipients, size=ev.size, status=ev.status,
+                                  graph_request_id=ev.graph_request_id))
+                audit.append(s, "ingest_batch", f"tenant:{tid}", {"events": len(body.events)})
+                s.commit()
+                break
+            except IntegrityError:
+                s.rollback()
+                if attempt == 7:
+                    raise
         return {"accepted": len(body.events)}
 
     # ---- dashboard ----
